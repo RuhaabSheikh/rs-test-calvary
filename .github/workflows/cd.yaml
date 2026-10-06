@@ -1,5 +1,5 @@
 name: "CD Pipeline"
-run-name: "Deploy ${{ inputs.environment }} (${{ inputs.ref }})"
+run-name: "Deploy to ${{ inputs.environment }} (${{ inputs.ref }})"
 
 # Manual only. One run targets exactly one environment:
 #   init > plan > approve (GitHub Environment) > apply the saved plan
