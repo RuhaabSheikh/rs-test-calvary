@@ -27,6 +27,9 @@ runs:
       uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
       with:
         tofu_version: ${{ inputs.tofu-version }}
+        # No wrapper: cd.yaml reads the real exit code of
+        # `tofu plan -detailed-exitcode`, which the wrapper can mask.
+        tofu_wrapper: false
 
     - name: OpenTofu Version
       shell: bash
