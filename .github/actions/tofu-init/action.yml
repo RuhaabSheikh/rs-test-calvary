@@ -1,0 +1,51 @@
+name: 'OpenTofu Init'
+description: 'Assumes the AWS role for an environment, installs OpenTofu, exports the TF_VAR_* values and runs tofu init'
+
+inputs:
+  environment:
+    description: 'Target environment — selects environments/<environment>.tfvars'
+    required: true
+  aws-region:
+    description: 'AWS region for deployment'
+    required: false
+    default: 'ap-southeast-2'
+  aws-role-arn:
+    description: 'AWS IAM role ARN to assume in the workload account'
+    required: true
+  tofu-version:
+    description: 'OpenTofu version to install'
+    required: false
+    default: '1.12.6'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Environment
+      uses: ./.github/actions/setup-environment
+      with:
+        aws-region: ${{ inputs.aws-region }}
+        aws-role-arn: ${{ inputs.aws-role-arn }}
+        tofu-version: ${{ inputs.tofu-version }}
+
+    # Exported once here so every later tofu call in the job inherits them.
+    # TOFU_VAR_FILES is deliberately NOT named TF_VAR_* — OpenTofu would read
+    # that prefix as an input variable called "files".
+    - name: Export OpenTofu variables
+      shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+      run: |
+        {
+          echo "TF_VAR_aws_region=${{ inputs.aws-region }}"
+          echo "TF_IN_AUTOMATION=1"
+          echo "TOFU_VAR_FILES=-var-file=environments/${TARGET_ENV}.tfvars -var-file=environments/common.tfvars"
+        } >> "$GITHUB_ENV"
+
+    # The S3 backend reads var.backend_bucket / var.backend_key (OpenTofu early
+    # variable evaluation), so the env tfvars file MUST be passed to init or
+    # each environment would resolve to the wrong state.
+    - name: OpenTofu Init
+      shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+      run: tofu init -input=false -var-file="environments/${TARGET_ENV}.tfvars" -var-file="environments/common.tfvars"

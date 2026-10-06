@@ -1,0 +1,134 @@
+name: "CD Pipeline"
+
+# Manual only. One run targets exactly one environment:
+#   init > plan > approve (GitHub Environment) > apply the saved plan
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to apply"
+        type: choice
+        options:
+          - test
+          - prod
+        required: true
+      ref:
+        description: "Git ref to deploy (branch, tag or SHA)"
+        type: string
+        default: main
+
+# One CD run per environment at a time, queued rather than cancelled.
+concurrency:
+  group: opentofu-cd-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: "Plan (${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      packages: read
+    outputs:
+      sha: ${{ steps.checkout.outputs.commit }}
+
+    steps:
+      - name: Generate GitHub App Token
+        id: generate-token
+        uses: tibdex/github-app-token@3beb63f4bd073e61482598c45c71c1019b59b73a # v2.1.0
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Extend Git credentials
+        uses: de-vri-es/setup-git-credentials@5dd446b3857806f44ea73acf83c193190a385d63 # v2.2.0
+        with:
+          credentials: https://user:${{ steps.generate-token.outputs.token }}@github.com
+
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+          ref: ${{ inputs.ref }}
+
+      - name: OpenTofu Init
+        uses: ./.github/actions/tofu-init
+        with:
+          environment: ${{ inputs.environment }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          tofu-version: "1.12.6"
+
+      # This is the plan the approver reviews before the apply job runs.
+      - name: OpenTofu Plan
+        run: |
+          # shellcheck disable=SC2086 # TOFU_VAR_FILES holds two separate flags
+          tofu plan -input=false -lock-timeout=5m $TOFU_VAR_FILES -out=tfplan
+
+      # The lock file goes too: no .terraform.lock.hcl is committed, so the
+      # apply job must resolve the identical provider versions.
+      - name: Upload plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tfplan-${{ inputs.environment }}-${{ github.run_id }}
+          path: |
+            tfplan
+            .terraform.lock.hcl
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: true
+
+  apply:
+    name: "Apply (${{ inputs.environment }})"
+    needs: plan
+    runs-on: ubuntu-latest
+    # Approval gate — required reviewers are set on the "test" / "prod"
+    # GitHub Environments.
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+      packages: read
+
+    steps:
+      - name: Generate GitHub App Token
+        id: generate-token
+        uses: tibdex/github-app-token@3beb63f4bd073e61482598c45c71c1019b59b73a # v2.1.0
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Extend Git credentials
+        uses: de-vri-es/setup-git-credentials@5dd446b3857806f44ea73acf83c193190a385d63 # v2.2.0
+        with:
+          credentials: https://user:${{ steps.generate-token.outputs.token }}@github.com
+
+      # The exact commit that was planned, not the current tip of inputs.ref.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+          ref: ${{ needs.plan.outputs.sha }}
+
+      # After checkout — checkout cleans the workspace and would remove these.
+      - name: Download plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tfplan-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: OpenTofu Init
+        uses: ./.github/actions/tofu-init
+        with:
+          environment: ${{ inputs.environment }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          tofu-version: "1.12.6"
+
+      # Saved plan: no -var-file (the values are baked in). A stale plan fails
+      # rather than applying something unreviewed — re-run the workflow.
+      - name: OpenTofu Apply
+        run: tofu apply -input=false -lock-timeout=5m tfplan
