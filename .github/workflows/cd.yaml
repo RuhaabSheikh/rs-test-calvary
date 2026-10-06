@@ -1,4 +1,5 @@
 name: "CD Pipeline"
+run-name: "Deploy ${{ inputs.environment }} (${{ inputs.ref }})"
 
 # Manual only. One run targets exactly one environment:
 #   init > plan > approve (GitHub Environment) > apply the saved plan
@@ -28,7 +29,7 @@ permissions:
 
 jobs:
   plan:
-    name: "Plan (${{ inputs.environment }})"
+    name: Plan
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -87,6 +88,11 @@ jobs:
               ;;
           esac
 
+      - name: Plan summary
+        uses: ./.github/actions/tofu-plan-summary
+        with:
+          environment: ${{ inputs.environment }}
+
       # The lock file goes too: no .terraform.lock.hcl is committed, so the
       # apply job must resolve the identical provider versions.
       - name: Upload plan
@@ -102,7 +108,9 @@ jobs:
           include-hidden-files: true
 
   apply:
-    name: "Apply (${{ inputs.environment }})"
+    # Static name: GitHub does not evaluate expressions in the name of a
+    # skipped job, so it would render literally. The environment is in run-name.
+    name: Apply
     needs: plan
     # Nothing to apply (and nobody to bother for approval) on an empty plan.
     if: needs.plan.outputs.has_changes == 'true'
@@ -152,3 +160,14 @@ jobs:
       # rather than applying something unreviewed — re-run the workflow.
       - name: OpenTofu Apply
         run: tofu apply -input=false -lock-timeout=5m tfplan
+
+      - name: Job summary
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          {
+            echo "## OpenTofu Apply — \`${TARGET_ENV}\`"
+            echo ""
+            echo "Applied the reviewed plan at \`${SHA}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

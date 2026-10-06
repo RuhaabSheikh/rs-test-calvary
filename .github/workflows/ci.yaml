@@ -106,40 +106,14 @@ jobs:
             *) exit "$code" ;;
           esac
 
-      - name: Build plan summary
-        env:
-          TARGET_ENV: ${{ matrix.environment }}
-        run: |
-          tofu show -json tfplan > plan.json
-          {
-            echo "## OpenTofu Plan — \`${TARGET_ENV}\`"
-            echo ""
-            jq -r '
-              [ .resource_changes[]? | select(.change.actions != ["no-op"]) ] as $changes
-              | if ($changes | length) == 0 then
-                  "No changes. Infrastructure matches the configuration."
-                else
-                  "**\($changes | length) resource(s) to change**\n\n"
-                  + ( $changes
-                      | group_by(.change.actions | join("+"))
-                      | sort_by(.[0].change.actions | join("+"))
-                      | map(
-                          "### " + (.[0].change.actions | join("+"))
-                          + " (" + (length | tostring) + ")\n\n"
-                          + "| Resource |\n|---|\n"
-                          + (map("| `" + .address + "` |") | join("\n"))
-                        )
-                      | join("\n\n") )
-                end
-            ' plan.json
-            echo ""
-            echo "_[View full plan output](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})_"
-          } > summary.md
-          # plan.json / tfplan hold resolved values — drop them before the job ends.
-          rm -f plan.json tfplan
+      - name: Plan summary
+        uses: ./.github/actions/tofu-plan-summary
+        with:
+          environment: ${{ matrix.environment }}
 
-      - name: Job summary
-        run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      # tfplan holds resolved values — drop it before the job ends.
+      - name: Remove plan file
+        run: rm -f tfplan
 
       # Skipped for forks: their github.token is read-only and cannot comment.
       - name: Comment plan on PR
