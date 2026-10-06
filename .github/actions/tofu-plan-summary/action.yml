@@ -1,0 +1,52 @@
+name: 'OpenTofu Plan Summary'
+description: 'Renders a saved plan as a Markdown table of resource changes, writes it to summary.md and appends it to the job summary'
+
+inputs:
+  environment:
+    description: 'Target environment — shown in the summary heading'
+    required: true
+  plan-file:
+    description: 'Saved plan file to summarise'
+    required: false
+    default: 'tfplan'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build plan summary
+      shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+        PLAN_FILE: ${{ inputs.plan-file }}
+      run: |
+        tofu show -json "$PLAN_FILE" > plan.json
+        {
+          echo "## OpenTofu Plan — \`${TARGET_ENV}\`"
+          echo ""
+          jq -r '
+            [ .resource_changes[]? | select(.change.actions != ["no-op"]) ] as $changes
+            | if ($changes | length) == 0 then
+                "No changes. Infrastructure matches the configuration."
+              else
+                "**\($changes | length) resource(s) to change**\n\n"
+                + ( $changes
+                    | group_by(.change.actions | join("+"))
+                    | sort_by(.[0].change.actions | join("+"))
+                    | map(
+                        "### " + (.[0].change.actions | join("+"))
+                        + " (" + (length | tostring) + ")\n\n"
+                        + "| Resource |\n|---|\n"
+                        + (map("| `" + .address + "` |") | join("\n"))
+                      )
+                    | join("\n\n") )
+              end
+          ' plan.json
+          echo ""
+          echo "_[View full plan output](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})_"
+        } > summary.md
+        # plan.json holds resolved values — drop it before the job ends.
+        rm -f plan.json
+
+    - name: Job summary
+      shell: bash
+      run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
