@@ -1,0 +1,160 @@
+name: "CI Pipeline"
+
+# Plan only. Never applies.
+#   - pull_request        -> plans every environment
+#   - push to main        -> plans every environment
+#   - workflow_dispatch   -> plans one environment, or all
+on:
+  pull_request:
+    paths:
+      - "*.tf"
+      - "environments/*.tfvars"
+      - "scripts/**"
+      - ".github/actions/**"
+      - ".github/workflows/ci.yaml"
+      - ".github/workflows/cd.yaml"
+  push:
+    branches:
+      - main
+    paths:
+      - "*.tf"
+      - "environments/*.tfvars"
+      - "scripts/**"
+      - ".github/actions/**"
+      - ".github/workflows/ci.yaml"
+      - ".github/workflows/cd.yaml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to plan"
+        type: choice
+        options:
+          - all
+          - test
+          - prod
+        default: all
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: "Plan (${{ matrix.environment }})"
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      packages: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # A dispatch for a single environment plans just that one; every other
+        # trigger (and "all") plans the full set.
+        environment: ${{ fromJSON( (github.event_name == 'workflow_dispatch' && inputs.environment != 'all') && format('["{0}"]', inputs.environment) || '["test","prod"]' ) }}
+
+    # Per environment, so a test plan is never blocked by a prod plan. Not
+    # cancellable: killing tofu mid-refresh can leave the S3 lock behind.
+    concurrency:
+      group: opentofu-plan-${{ matrix.environment }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Generate GitHub App Token
+        id: generate-token
+        uses: tibdex/github-app-token@3beb63f4bd073e61482598c45c71c1019b59b73a # v2.1.0
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Extend Git credentials
+        uses: de-vri-es/setup-git-credentials@5dd446b3857806f44ea73acf83c193190a385d63 # v2.2.0
+        with:
+          credentials: https://user:${{ steps.generate-token.outputs.token }}@github.com
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+
+      - name: OpenTofu Init
+        uses: ./.github/actions/tofu-init
+        with:
+          environment: ${{ matrix.environment }}
+          aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          tofu-version: "1.12.6"
+
+      - name: OpenTofu Format Check
+        run: tofu fmt -check -recursive
+
+      - name: OpenTofu Validate
+        run: tofu validate
+
+      - name: OpenTofu Plan
+        id: plan
+        run: |
+          set +e
+          # shellcheck disable=SC2086 # TOFU_VAR_FILES holds two separate flags
+          tofu plan -input=false -lock-timeout=5m -detailed-exitcode \
+            $TOFU_VAR_FILES -out=tfplan
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) exit "$code" ;;
+          esac
+
+      - name: Build plan summary
+        env:
+          TARGET_ENV: ${{ matrix.environment }}
+        run: |
+          tofu show -json tfplan > plan.json
+          {
+            echo "## OpenTofu Plan — \`${TARGET_ENV}\`"
+            echo ""
+            jq -r '
+              [ .resource_changes[]? | select(.change.actions != ["no-op"]) ] as $changes
+              | if ($changes | length) == 0 then
+                  "No changes. Infrastructure matches the configuration."
+                else
+                  "**\($changes | length) resource(s) to change**\n\n"
+                  + ( $changes
+                      | group_by(.change.actions | join("+"))
+                      | sort_by(.[0].change.actions | join("+"))
+                      | map(
+                          "### " + (.[0].change.actions | join("+"))
+                          + " (" + (length | tostring) + ")\n\n"
+                          + "| Resource |\n|---|\n"
+                          + (map("| `" + .address + "` |") | join("\n"))
+                        )
+                      | join("\n\n") )
+                end
+            ' plan.json
+            echo ""
+            echo "_[View full plan output](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})_"
+          } > summary.md
+          # plan.json / tfplan hold resolved values — drop them before the job ends.
+          rm -f plan.json tfplan
+
+      - name: Job summary
+        run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Skipped for forks: their github.token is read-only and cannot comment.
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          MARKER: "<!-- tofu-plan:${{ matrix.environment }} -->"
+        run: |
+          # Comment bodies cap at 65536 chars; leave room for the marker.
+          body="${MARKER}"$'\n'"$(head -c 60000 summary.md)"
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+                 --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" -f body="$body"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$body"
+          fi
