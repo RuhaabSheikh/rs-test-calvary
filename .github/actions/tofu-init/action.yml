@@ -3,7 +3,7 @@ description: 'Assumes the AWS role for an environment, installs OpenTofu, export
 
 inputs:
   environment:
-    description: 'Target environment — selects environments/<environment>.tfvars'
+    description: 'Target environment — selects environments/<environment>.tfvars and environments/config.<environment>.tfbackend'
     required: true
   aws-region:
     description: 'AWS region for deployment'
@@ -41,11 +41,10 @@ runs:
           echo "TOFU_VAR_FILES=-var-file=environments/${TARGET_ENV}.tfvars -var-file=environments/common.tfvars"
         } >> "$GITHUB_ENV"
 
-    # The S3 backend reads var.backend_bucket / var.backend_key (OpenTofu early
-    # variable evaluation), so the env tfvars file MUST be passed to init or
-    # each environment would resolve to the wrong state.
+    # The S3 backend block is empty; bucket, key and region come from the
+    # environment's tfbackend file, so each environment gets its own state.
     - name: OpenTofu Init
       shell: bash
       env:
         TARGET_ENV: ${{ inputs.environment }}
-      run: tofu init -input=false -var-file="environments/${TARGET_ENV}.tfvars" -var-file="environments/common.tfvars"
+      run: tofu init -input=false -backend-config="environments/config.${TARGET_ENV}.tfbackend"

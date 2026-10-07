@@ -17,6 +17,7 @@ on:
     paths:
       - "*.tf"
       - "environments/*.tfvars"
+      - "environments/*.tfbackend"
       - "scripts/**"
       - ".github/actions/**"
       - ".github/workflows/ci.yaml"
