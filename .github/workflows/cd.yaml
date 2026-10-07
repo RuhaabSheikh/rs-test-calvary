@@ -4,9 +4,10 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && format('Break-glass d
 # plan every environment > then per environment, one at a time:
 #   approve the plan (GitHub Environment) > apply the saved plan
 #
-#   - merge to main       -> deploys every GitHub Environment on the repo, in
-#                            promotion order. A failure stops the pipeline,
-#                            so higher environments are never reached.
+#   - merge to main       -> deploys the GitHub Environments on the repo that
+#                            are in the promotion order, lowest first. A
+#                            failure stops the pipeline, so higher
+#                            environments are never reached.
 #   - workflow_dispatch   -> break-glass: deploys exactly one environment from
 #                            any ref, without going through test first.
 on:
@@ -48,15 +49,15 @@ jobs:
       list: ${{ steps.resolve.outputs.list }}
 
     steps:
-      # A dispatch deploys just the chosen environment; a merge deploys every
-      # GitHub Environment configured on the repository, in promotion order.
+      # A dispatch deploys just the chosen environment; a merge deploys the
+      # GitHub Environments configured on the repository that appear in
+      # PROMOTION_ORDER, in that order.
       - name: Resolve environments
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
           DISPATCH_ENV: ${{ inputs.environment }}
-          # Lowest to highest. An environment not listed here is deployed just
-          # before prod.
+          # Lowest to highest. An environment not listed here is not deployed.
           PROMOTION_ORDER: '["dev","sit","test","uat","preprod","prod"]'
         run: |
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
@@ -64,11 +65,11 @@ jobs:
           else
             list=$(gh api "repos/${GITHUB_REPOSITORY}/environments" --paginate --jq '.environments[].name' \
               | jq -Rnc --argjson order "$PROMOTION_ORDER" \
-                  '[inputs] | sort_by([(. as $env | $order | index($env)) // (($order | length) - 1.5), .])')
+                  '[inputs] as $envs | $order | map(select(IN($envs[])))')
           fi
 
           if [ "$list" = "[]" ]; then
-            echo "::error::No GitHub Environments are configured on this repository."
+            echo "::error::No GitHub Environments from the promotion order are configured on this repository."
             exit 1
           fi
 
