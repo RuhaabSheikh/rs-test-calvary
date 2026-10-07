@@ -8,14 +8,10 @@ terraform {
     }
   }
 
-  # Variables here rely on OpenTofu early evaluation; the env tfvars file must
-  # be passed to `tofu init` (the tofu-init action does this).
+  # Partial configuration: the rest comes from
+  # environments/config.<environment>.tfbackend, passed to `tofu init` with
+  # -backend-config (the tofu-init action does this).
   backend "s3" {
-    bucket       = var.backend_bucket
-    key          = var.backend_key
-    region       = var.aws_region
-    encrypt      = true
-    use_lockfile = true
   }
 }
 
