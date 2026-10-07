@@ -1,9 +1,24 @@
 name: "CD Pipeline"
-run-name: "Deploy to ${{ inputs.environment }} (${{ inputs.ref }})"
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('Break-glass deploy to {0} ({1})', inputs.environment, inputs.ref) || format('Deploy: {0}', github.sha) }}"
 
-# Manual only. One run targets exactly one environment:
-#   init > plan > approve (GitHub Environment) > apply the saved plan
+# plan every environment > then per environment, one at a time:
+#   approve the plan (GitHub Environment) > apply the saved plan
+#
+#   - merge to main       -> deploys test, then prod. A failure stops the
+#                            pipeline, so prod is never reached.
+#   - workflow_dispatch   -> break-glass: deploys exactly one environment from
+#                            any ref, without going through test first.
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "*.tf"
+      - "environments/*.tfvars"
+      - "scripts/**"
+      - ".github/actions/**"
+      - ".github/workflows/ci.yaml"
+      - ".github/workflows/cd.yaml"
   workflow_dispatch:
     inputs:
       environment:
@@ -18,26 +33,29 @@ on:
         type: string
         default: main
 
-# One CD run per environment at a time, queued rather than cancelled.
-concurrency:
-  group: opentofu-cd-${{ inputs.environment }}
-  cancel-in-progress: false
-
 permissions:
   id-token: write
   contents: read
 
 jobs:
   plan:
-    name: Plan
+    name: "Plan (${{ matrix.environment }})"
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
       packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # A dispatch deploys just the chosen environment; a merge deploys all.
+        environment: ${{ fromJSON( github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.environment) || '["test","prod"]' ) }}
+    # One output per environment: each matrix leg only sets its own, so the
+    # legs do not overwrite each other.
     outputs:
       sha: ${{ steps.checkout.outputs.commit }}
-      has_changes: ${{ steps.plan.outputs.has_changes }}
+      test: ${{ steps.plan.outputs.test }}
+      prod: ${{ steps.plan.outputs.prod }}
 
     steps:
       - name: Generate GitHub App Token
@@ -52,17 +70,18 @@ jobs:
         with:
           credentials: https://user:${{ steps.generate-token.outputs.token }}@github.com
 
+      # On merge: the merge commit, not whatever main points at now.
       - name: Checkout
         id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ steps.generate-token.outputs.token }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
 
       - name: OpenTofu Init
         uses: ./.github/actions/tofu-init
         with:
-          environment: ${{ inputs.environment }}
+          environment: ${{ matrix.environment }}
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
           tofu-version: "1.12.6"
 
@@ -70,6 +89,8 @@ jobs:
       # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes to apply.
       - name: OpenTofu Plan
         id: plan
+        env:
+          TARGET_ENV: ${{ matrix.environment }}
         run: |
           exit_code=0
           # shellcheck disable=SC2086 # TOFU_VAR_FILES holds two separate flags
@@ -77,11 +98,11 @@ jobs:
 
           case "$exit_code" in
             0)
-              echo "has_changes=false" >> "$GITHUB_OUTPUT"
-              echo "::notice::No changes in plan - apply will be skipped."
+              echo "${TARGET_ENV}=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::No changes in ${TARGET_ENV} plan - apply will be skipped."
               ;;
             2)
-              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+              echo "${TARGET_ENV}=true" >> "$GITHUB_OUTPUT"
               ;;
             *)
               exit "$exit_code"
@@ -91,15 +112,15 @@ jobs:
       - name: Plan summary
         uses: ./.github/actions/tofu-plan-summary
         with:
-          environment: ${{ inputs.environment }}
+          environment: ${{ matrix.environment }}
 
       # The lock file goes too: no .terraform.lock.hcl is committed, so the
       # apply job must resolve the identical provider versions.
       - name: Upload plan
-        if: steps.plan.outputs.has_changes == 'true'
+        if: steps.plan.outputs[matrix.environment] == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: tfplan-${{ inputs.environment }}-${{ github.run_id }}
+          name: tfplan-${{ matrix.environment }}-${{ github.run_id }}
           path: |
             tfplan
             .terraform.lock.hcl
@@ -108,20 +129,35 @@ jobs:
           include-hidden-files: true
 
   apply:
-    # Static name: GitHub does not evaluate expressions in the name of a
-    # skipped job, so it would render literally. The environment is in run-name.
-    name: Apply
+    name: "Apply (${{ matrix.environment }})"
+    # Needs every plan to succeed: a failed plan in any environment stops the
+    # pipeline before anything is applied.
     needs: plan
-    # Nothing to apply (and nobody to bother for approval) on an empty plan.
-    if: needs.plan.outputs.has_changes == 'true'
+    # Nothing to apply (and nobody to bother for approval) if every plan is empty.
+    if: needs.plan.outputs.test == 'true' || needs.plan.outputs.prod == 'true'
     runs-on: ubuntu-latest
-    # Approval gate — required reviewers are set on the "test" / "prod"
-    # GitHub Environments.
-    environment: ${{ inputs.environment }}
     permissions:
       id-token: write
       contents: read
       packages: read
+    strategy:
+      # In matrix order, one at a time; the first failure cancels the rest.
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        # Only the environments whose plan has changes, test before prod. The
+        # matrix context is not available in a job-level `if`, so an empty
+        # plan is dropped here rather than skipped there.
+        environment: ${{ fromJSON( needs.plan.outputs.test == 'true' && (needs.plan.outputs.prod == 'true' && '["test","prod"]' || '["test"]') || '["prod"]' ) }}
+
+    # One apply per environment at a time, queued rather than cancelled.
+    concurrency:
+      group: opentofu-cd-${{ matrix.environment }}
+      cancel-in-progress: false
+
+    # Approval gate — required reviewers are set on the "test" / "prod"
+    # GitHub Environments. The plan to review is in the run summary.
+    environment: ${{ matrix.environment }}
 
     steps:
       - name: Generate GitHub App Token
@@ -136,7 +172,7 @@ jobs:
         with:
           credentials: https://user:${{ steps.generate-token.outputs.token }}@github.com
 
-      # The exact commit that was planned, not the current tip of inputs.ref.
+      # The exact commit that was planned, not the current tip of the ref.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -147,12 +183,12 @@ jobs:
       - name: Download plan
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: tfplan-${{ inputs.environment }}-${{ github.run_id }}
+          name: tfplan-${{ matrix.environment }}-${{ github.run_id }}
 
       - name: OpenTofu Init
         uses: ./.github/actions/tofu-init
         with:
-          environment: ${{ inputs.environment }}
+          environment: ${{ matrix.environment }}
           aws-role-arn: ${{ secrets.AWS_ROLE_ARN }}
           tofu-version: "1.12.6"
 
@@ -163,7 +199,7 @@ jobs:
 
       - name: Job summary
         env:
-          TARGET_ENV: ${{ inputs.environment }}
+          TARGET_ENV: ${{ matrix.environment }}
           SHA: ${{ needs.plan.outputs.sha }}
         run: |
           {
