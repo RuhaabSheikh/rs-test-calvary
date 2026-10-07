@@ -12,7 +12,6 @@ on:
       - "scripts/**"
       - ".github/actions/**"
       - ".github/workflows/ci.yaml"
-      - ".github/workflows/cd.yaml"
   workflow_dispatch:
     inputs:
       environment:
