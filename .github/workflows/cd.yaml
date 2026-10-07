@@ -1,5 +1,5 @@
 name: "CD Pipeline"
-run-name: "${{ github.event_name == 'workflow_dispatch' && format('Break-glass deploy to {0} ({1})', inputs.environment, inputs.ref) || format('Deploy: {0}', github.sha) }}"
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('Break-glass deploy to {0} ({1})', inputs.environment, inputs.ref) || format('Deploy: {0}', github.event.head_commit.message) }}"
 
 # plan every environment > then per environment, one at a time:
 #   approve the plan (GitHub Environment) > apply the saved plan
