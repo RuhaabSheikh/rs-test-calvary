@@ -3,17 +3,17 @@
 
 # --- Real values from the bucket ---
 
-output "bucket_arn" {
-  value = aws_s3_bucket.test.arn
-}
+# output "bucket_arn" {
+#   value = aws_s3_bucket.test.arn
+# }
 
-output "bucket_regional_domain_name" {
-  value = aws_s3_bucket.test.bucket_regional_domain_name
-}
+# output "bucket_regional_domain_name" {
+#   value = aws_s3_bucket.test.bucket_regional_domain_name
+# }
 
-output "bucket_tags" {
-  value = aws_s3_bucket.test.tags_all
-}
+# output "bucket_tags" {
+#   value = aws_s3_bucket.test.tags_all
+# }
 
 # --- Scalar types ---
 

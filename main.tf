@@ -1,12 +1,12 @@
-resource "aws_s3_bucket" "test" {
-  # Prefix rather than a fixed name: bucket names are global, so this avoids
-  # collisions and keeps test/prod distinct.
-  bucket_prefix = "rs-test-calvary-bucket-${var.environment}-"
+# resource "aws_s3_bucket" "test" {
+#   # Prefix rather than a fixed name: bucket names are global, so this avoids
+#   # collisions and keeps test/prod distinct.
+#   bucket_prefix = "rs-test-calvary-bucket-${var.environment}-"
 
-  # Throwaway bucket: let destroy succeed even if objects were left in it.
-  force_destroy = true
-}
+#   # Throwaway bucket: let destroy succeed even if objects were left in it.
+#   force_destroy = true
+# }
 
-output "test_bucket_name" {
-  value = aws_s3_bucket.test.id
-}
+# output "test_bucket_name" {
+#   value = aws_s3_bucket.test.id
+# }

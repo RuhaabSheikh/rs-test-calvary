@@ -261,10 +261,11 @@ jobs:
           TARGET_ENV: ${{ matrix.environment }}
           SHA: ${{ needs.plan.outputs.sha }}
         run: |
+          COMMIT_MSG="$(git log -1 --format=%s "${SHA}")"
           {
             echo "## OpenTofu Apply — \`${TARGET_ENV}\`"
             echo ""
-            echo "Applied the reviewed plan at \`${SHA}\`."
+            echo "Applied: ${COMMIT_MSG} (\`${SHA:0:7}\`)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Output summary
