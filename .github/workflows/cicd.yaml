@@ -1,4 +1,4 @@
-name: "CD Pipeline"
+name: "CI/CD Pipeline"
 run-name: "${{ github.event_name == 'workflow_dispatch' && format('Break-glass deploy to {0} ({1})', inputs.environment, inputs.ref) || format('Deploy: {0}', github.event.head_commit.message) }}"
 
 # plan every environment > then per environment, one at a time:
@@ -94,7 +94,7 @@ jobs:
     steps:
       - name: Generate GitHub App Token
         id: generate-token
-        uses: tibdex/github-app-token@3beb63f4bd073e61482598c45c71c1019b59b73a
+        uses: tibdex/github-app-token@3beb63f4bd073e61482598c45c71c1019b59b73a # v2.1.0
         with:
           app_id: ${{ secrets.APP_ID }}
           private_key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -266,3 +266,8 @@ jobs:
             echo ""
             echo "Applied the reviewed plan at \`${SHA}\`."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Output summary
+        uses: ./.github/actions/tofu-output-summary
+        with:
+          environment: ${{ matrix.environment }}

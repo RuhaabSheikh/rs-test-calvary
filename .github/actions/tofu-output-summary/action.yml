@@ -1,0 +1,52 @@
+name: 'OpenTofu Output Summary'
+description: 'Renders the root module outputs as a Markdown table and appends it to the job summary'
+
+inputs:
+  environment:
+    description: 'Target environment — shown in the summary heading'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build output summary
+      shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+      run: |
+        tofu output -json > outputs.json
+        {
+          echo "### Outputs — \`${TARGET_ENV}\`"
+          echo ""
+          # Sensitive outputs are masked: the job summary is readable by
+          # anyone with read access to the repository.
+          jq -r '
+            to_entries as $outputs
+            | if ($outputs | length) == 0 then
+                "No outputs."
+              else
+                "| Output | Value |\n|---|---|\n"
+                + ( $outputs
+                    | map(
+                        "| `" + .key + "` | "
+                        + ( if .value.sensitive then
+                              "_(sensitive)_"
+                            else
+                              .value.value
+                              | (if type == "string" then . else tojson end)
+                              | gsub("\\|"; "\\|")
+                              | gsub("\n"; "<br>")
+                              | "`" + . + "`"
+                            end )
+                        + " |"
+                      )
+                    | join("\n") )
+              end
+          ' outputs.json
+        } > outputs.md
+        # outputs.json holds sensitive values in plain text — drop it.
+        rm -f outputs.json
+
+    - name: Job summary
+      shell: bash
+      run: cat outputs.md >> "$GITHUB_STEP_SUMMARY"
