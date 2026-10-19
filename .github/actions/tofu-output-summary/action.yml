@@ -1,5 +1,5 @@
 name: 'OpenTofu Output Summary'
-description: 'Renders the root module outputs as Markdown and appends it to the job summary'
+description: 'Renders the root module outputs as a Markdown table and appends it to the job summary'
 
 inputs:
   environment:
@@ -15,58 +15,65 @@ runs:
         TARGET_ENV: ${{ inputs.environment }}
       run: |
         tofu output -json > outputs.json
-
-        # Non-empty maps/lists can't be pretty-printed inside a table cell
-        # (cells must be one line), so they get a collapsible JSON block
-        # instead. Everything else, including sensitive values, goes in the table.
-        STRUCTURED='def structured:
-          (.sensitive | not)
-          and (.value | type == "object" or type == "array")
-          and (.value | length) > 0;'
-
         {
           echo "### Outputs — \`${TARGET_ENV}\`"
           echo ""
-
-          if [ "$(jq 'length' outputs.json)" -eq 0 ]; then
-            echo "No outputs."
-          fi
-
           # Sensitive outputs are masked: the job summary is readable by
           # anyone with read access to the repository.
-          jq -r "${STRUCTURED}"'
-            [ to_entries[] | select(.value | structured | not) ]
-            | if length == 0 then
-                empty
+          jq -r '
+            # Indented JSON, like `jq .` (jq has no built-in to pretty-print
+            # into a string). Empty maps/lists stay on one line.
+            def pretty($indent):
+              if type == "object" and length > 0 then
+                "{\n"
+                + ( to_entries
+                    | map($indent + "  " + (.key | tojson) + ": " + (.value | pretty($indent + "  ")))
+                    | join(",\n") )
+                + "\n" + $indent + "}"
+              elif type == "array" and length > 0 then
+                "[\n"
+                + ( map($indent + "  " + pretty($indent + "  ")) | join(",\n") )
+                + "\n" + $indent + "]"
+              else
+                tojson
+              end;
+
+            # A table row must be a single line, so the value is raw HTML:
+            # <br> for newlines, &nbsp; for indentation, <pre> to keep
+            # structured values laid out. Markdown still applies inside raw
+            # HTML, so its special characters become entities too.
+            def cell:
+              (type == "object" or type == "array") as $structured
+              | (if type == "string" then . elif $structured then pretty("") else tojson end)
+              | gsub("&"; "&amp;")
+              | gsub("<"; "&lt;")
+              | gsub(">"; "&gt;")
+              | gsub("(?<c>[\\\\`*_\\[\\]~])"; "&#\(.c | explode[0]);")
+              | gsub("\\|"; "\\|")
+              | split("\n")
+              | map(
+                  capture("^(?<lead> *)(?<rest>.*)$")
+                  | (.lead | gsub(" "; "&nbsp;")) + .rest
+                )
+              | join("<br>")
+              | if $structured and (contains("<br>")) then
+                  "<pre>" + . + "</pre>"
+                else
+                  "<code>" + . + "</code>"
+                end;
+
+            to_entries as $outputs
+            | if ($outputs | length) == 0 then
+                "No outputs."
               else
                 "| Output | Value |",
                 "|---|---|",
-                ( .[]
+                ( $outputs[]
                   | "| `" + .key + "` | "
-                    + ( if .value.sensitive then
-                          "_(sensitive)_"
-                        else
-                          .value.value
-                          | (if type == "string" then . else tojson end)
-                          | gsub("\\|"; "\\|")
-                          | gsub("\n"; "<br>")
-                          | "`" + . + "`"
-                        end )
+                    + (if .value.sensitive then "_(sensitive)_" else .value.value | cell end)
                     + " |" )
               end
           ' outputs.json
-
-          jq -r "${STRUCTURED}"' to_entries[] | select(.value | structured) | .key' outputs.json \
-            | while read -r key; do
-                echo ""
-                echo "<details><summary><code>${key}</code></summary>"
-                echo ""
-                echo '```json'
-                jq --arg k "$key" '.[$k].value' outputs.json
-                echo '```'
-                echo ""
-                echo "</details>"
-              done
         } > outputs.md
         # outputs.json holds sensitive values in plain text — drop it.
         rm -f outputs.json
